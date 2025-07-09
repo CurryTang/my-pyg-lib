@@ -143,6 +143,7 @@ class NeighborSampler {
             dst_mapper, generator, out_global_dst_nodes);
   }
 
+
   std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>>
   get_sampled_edges(bool csc = false) {
     TORCH_CHECK(save_edges, "No edges have been stored")
@@ -355,8 +356,8 @@ sample(const at::Tensor& rowptr,
               "Temporal sampling needs to create disjoint subgraphs");
   TORCH_CHECK(!edge_time.has_value() || disjoint,
               "Temporal sampling needs to create disjoint subgraphs");
-  TORCH_CHECK(!(node_time.has_value() && edge_time.has_value()),
-              "Only one of node-level or edge-level sampling is supported ");
+  // TORCH_CHECK(!(node_time.has_value() && edge_time.has_value()),
+  //             "Only one of node-level or edge-level sampling is supported ");
 
   TORCH_CHECK(rowptr.is_contiguous(), "Non-contiguous 'rowptr'");
   TORCH_CHECK(col.is_contiguous(), "Non-contiguous 'col'");
@@ -523,6 +524,7 @@ template <bool replace,
 std::tuple<c10::Dict<rel_type, at::Tensor>,
            c10::Dict<rel_type, at::Tensor>,
            c10::Dict<node_type, at::Tensor>,
+           c10::Dict<node_type, at::Tensor>, // New: Hop dictionary
            c10::optional<c10::Dict<rel_type, at::Tensor>>,
            c10::Dict<node_type, std::vector<int64_t>>,
            c10::Dict<rel_type, std::vector<int64_t>>>
@@ -542,8 +544,8 @@ sample(const std::vector<node_type>& node_types,
               "Node temporal sampling needs to create disjoint subgraphs");
   TORCH_CHECK(!edge_time_dict.has_value() || disjoint,
               "Edge temporal sampling needs to create disjoint subgraphs");
-  TORCH_CHECK(!(node_time_dict.has_value() && edge_time_dict.has_value()),
-              "Only one of node-level or edge-level sampling is supported ");
+  // TORCH_CHECK(!(node_time_dict.has_value() && edge_time_dict.has_value()),
+  //             "Only one of node-level or edge-level sampling is supported ");
 
   for (const auto& kv : rowptr_dict) {
     const at::Tensor& rowptr = kv.value();
@@ -583,6 +585,7 @@ sample(const std::vector<node_type>& node_types,
 
   c10::Dict<rel_type, at::Tensor> out_row_dict, out_col_dict;
   c10::Dict<node_type, at::Tensor> out_node_id_dict;
+  c10::Dict<node_type, at::Tensor> out_hop_dict; // New: Hop dictionary
   c10::optional<c10::Dict<node_type, at::Tensor>> out_edge_id_dict;
   if (return_edge_id) {
     out_edge_id_dict = c10::Dict<rel_type, at::Tensor>();
@@ -619,6 +622,8 @@ sample(const std::vector<node_type>& node_types,
 
     size_t L = 0;  // num_layers.
     phmap::flat_hash_map<node_type, std::vector<node_t>> sampled_nodes_dict;
+    // New: Hop tracking map
+    phmap::flat_hash_map<node_type, std::vector<int64_t>> sampled_hops_dict;
     phmap::flat_hash_map<node_type, Mapper<node_t, scalar_t>> mapper_dict;
     phmap::flat_hash_map<edge_type, NeighborSamplerImpl> sampler_dict;
     phmap::flat_hash_map<node_type, std::pair<size_t, size_t>> slice_dict;
@@ -627,6 +632,7 @@ sample(const std::vector<node_type>& node_types,
     for (const auto& k : node_types) {
       const auto N = num_nodes_dict.count(k) > 0 ? num_nodes_dict.at(k) : 0;
       sampled_nodes_dict[k];  // Initialize empty vector.
+      sampled_hops_dict[k];   // New: Initialize empty hop vector.
       num_sampled_nodes_per_hop_map.insert({k, std::vector<int64_t>(1, 0)});
       mapper_dict.insert({k, Mapper<node_t, scalar_t>(N)});
       slice_dict[k] = {0, 0};
@@ -671,13 +677,17 @@ sample(const std::vector<node_type>& node_types,
 
       if constexpr (!disjoint) {
         sampled_nodes_dict[kv.key()] = pyg::utils::to_vector<scalar_t>(seed);
+        // New: Assign hop 0 to all seed nodes.
+        sampled_hops_dict.at(kv.key()).assign(seed.numel(), 0);
         mapper_dict.at(kv.key()).fill(seed);
       } else {
         auto& sampled_nodes = sampled_nodes_dict.at(kv.key());
+        auto& sampled_hops = sampled_hops_dict.at(kv.key()); // New
         auto& mapper = mapper_dict.at(kv.key());
         const auto seed_data = seed.data_ptr<scalar_t>();
         for (size_t i = 0; i < seed.numel(); ++i) {
           sampled_nodes.push_back({batch_idx, seed_data[i]});
+          sampled_hops.push_back(0); // New: Add hop 0 for each seed.
           mapper.insert({batch_idx, seed_data[i]});
           batch_idx++;
         }
@@ -757,8 +767,23 @@ sample(const std::vector<node_type>& node_types,
                         /*out_global_dst_nodes=*/dst_sampled_nodes);
                   }
                 } else if constexpr (!std::is_scalar<node_t>::value) {
-                  if (edge_time_dict.has_value() &&
-                      edge_time_dict.value().contains(to_rel_type(k))) {
+                  if (node_time_dict.has_value() &&
+                      node_time_dict.value().contains(dst)) {
+                    const at::Tensor& dst_time = node_time_dict.value().at(dst);
+                    const auto dst_time_data = dst_time.data_ptr<temporal_t>();
+                    for (size_t i = begin; i < end; ++i) {
+                      const auto batch_idx = src_sampled_nodes[i].first;
+                      sampler.node_temporal_sample(
+                          /*global_src_node=*/src_sampled_nodes[i],
+                          /*local_src_node=*/i,
+                          /*count=*/count,
+                          /*seed_time=*/seed_times[batch_idx],
+                          /*time=*/dst_time_data,
+                          /*dst_mapper=*/dst_mapper,
+                          /*generator=*/generator,
+                          /*out_global_dst_nodes=*/dst_sampled_nodes);
+                    }
+                  } else {
                     // Edge-level temporal sampling:
                     const at::Tensor& edge_time =
                         edge_time_dict.value().at(to_rel_type(k));
@@ -776,22 +801,7 @@ sample(const std::vector<node_type>& node_types,
                           /*generator=*/generator,
                           /*out_global_dst_nodes=*/dst_sampled_nodes);
                     }
-                  } else {
-                    // Node-level temporal sampling:
-                    const at::Tensor& dst_time = node_time_dict.value().at(dst);
-                    const auto dst_time_data = dst_time.data_ptr<temporal_t>();
-                    for (size_t i = begin; i < end; ++i) {
-                      const auto batch_idx = src_sampled_nodes[i].first;
-                      sampler.node_temporal_sample(
-                          /*global_src_node=*/src_sampled_nodes[i],
-                          /*local_src_node=*/i,
-                          /*count=*/count,
-                          /*seed_time=*/seed_times[batch_idx],
-                          /*time=*/dst_time_data,
-                          /*dst_mapper=*/dst_mapper,
-                          /*generator=*/generator,
-                          /*out_global_dst_nodes=*/dst_sampled_nodes);
-                    }
+                    
                   }
                 }
               }
@@ -805,16 +815,26 @@ sample(const std::vector<node_type>& node_types,
         }
       }
       for (const auto& k : node_types) {
-        slice_dict[k] = {slice_dict.at(k).second,
-                         sampled_nodes_dict.at(k).size()};
-        num_sampled_nodes_per_hop_map.at(k).push_back(slice_dict.at(k).second -
-                                                      slice_dict.at(k).first);
+        const auto begin_hop = slice_dict.at(k).second;
+        const auto end_hop = sampled_nodes_dict.at(k).size();
+        const auto num_new = end_hop - begin_hop;
+        if (num_new > 0) {
+            sampled_hops_dict.at(k).insert(sampled_hops_dict.at(k).end(),
+                                           num_new, ell + 1);
+        }
+
+        // Update slice dict and per-hop counts
+        slice_dict[k] = {begin_hop, end_hop};
+        num_sampled_nodes_per_hop_map.at(k).push_back(num_new);
       }
     }
 
     for (const auto& k : node_types) {
       out_node_id_dict.insert(
           k, pyg::utils::from_vector(sampled_nodes_dict.at(k)));
+      // New: Convert hop vector to tensor and add to output dict.
+      out_hop_dict.insert(
+          k, pyg::utils::from_vector(sampled_hops_dict.at(k)));
       num_sampled_nodes_per_hop_dict.insert(
           k, num_sampled_nodes_per_hop_map.at(k));
     }
@@ -836,6 +856,7 @@ sample(const std::vector<node_type>& node_types,
   });
 
   return std::make_tuple(out_row_dict, out_col_dict, out_node_id_dict,
+                         out_hop_dict, // New: Add hop dictionary
                          out_edge_id_dict, num_sampled_nodes_per_hop_dict,
                          num_sampled_edges_per_hop_dict);
 }
@@ -928,6 +949,7 @@ neighbor_sample_kernel(const at::Tensor& rowptr,
 std::tuple<c10::Dict<rel_type, at::Tensor>,
            c10::Dict<rel_type, at::Tensor>,
            c10::Dict<node_type, at::Tensor>,
+           c10::Dict<node_type, at::Tensor>, // New: Hop dictionary
            c10::optional<c10::Dict<rel_type, at::Tensor>>,
            c10::Dict<node_type, std::vector<int64_t>>,
            c10::Dict<rel_type, std::vector<int64_t>>>
@@ -975,6 +997,37 @@ dist_neighbor_sample_kernel(const at::Tensor& rowptr,
   }();
   return std::make_tuple(std::get<2>(out), std::get<3>(out).value(),
                          std::get<6>(out));
+}
+
+
+std::tuple<c10::Dict<rel_type, at::Tensor>,
+           c10::Dict<rel_type, at::Tensor>,
+           c10::Dict<node_type, at::Tensor>,
+           c10::Dict<node_type, at::Tensor>, // New: Hop dictionary
+           c10::optional<c10::Dict<rel_type, at::Tensor>>,
+           c10::Dict<node_type, std::vector<int64_t>>,
+           c10::Dict<rel_type, std::vector<int64_t>>>
+hetero_temporal_neighbor_sample_kernel(
+    const std::vector<node_type>& node_types,
+    const std::vector<edge_type>& edge_types,
+    const c10::Dict<rel_type, at::Tensor>& rowptr_dict,
+    const c10::Dict<rel_type, at::Tensor>& col_dict,
+    const c10::Dict<node_type, at::Tensor>& seed_dict,
+    const c10::Dict<rel_type, std::vector<int64_t>>& num_neighbors_dict,
+    const c10::optional<c10::Dict<node_type, at::Tensor>>& node_time_dict,
+    const c10::optional<c10::Dict<rel_type, at::Tensor>>& edge_time_dict,
+    const c10::optional<c10::Dict<node_type, at::Tensor>>& seed_time_dict,
+    const c10::optional<c10::Dict<rel_type, at::Tensor>>& edge_weight_dict,
+    bool csc,
+    bool replace,
+    bool directed,
+    bool disjoint,
+    std::string temporal_strategy,
+    bool return_edge_id) {
+  DISPATCH_SAMPLE(replace, directed, disjoint, return_edge_id, node_types,
+                  edge_types, rowptr_dict, col_dict, seed_dict,
+                  num_neighbors_dict, node_time_dict, edge_time_dict,
+                  seed_time_dict, edge_weight_dict, csc, temporal_strategy);
 }
 
 TORCH_LIBRARY_IMPL(pyg, CPU, m) {

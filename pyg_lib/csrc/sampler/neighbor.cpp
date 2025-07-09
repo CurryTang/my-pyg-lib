@@ -47,6 +47,7 @@ neighbor_sample(const at::Tensor& rowptr,
 std::tuple<c10::Dict<rel_type, at::Tensor>,
            c10::Dict<rel_type, at::Tensor>,
            c10::Dict<node_type, at::Tensor>,
+           c10::Dict<node_type, at::Tensor>, // New: Hop dictionary
            c10::optional<c10::Dict<rel_type, at::Tensor>>,
            c10::Dict<node_type, std::vector<int64_t>>,
            c10::Dict<rel_type, std::vector<int64_t>>>
@@ -144,6 +145,7 @@ TORCH_LIBRARY_FRAGMENT(pyg, m) {
       "bool replace = False, bool directed = True, bool disjoint = False, "
       "str temporal_strategy = 'uniform', bool return_edge_id = True) -> "
       "(Dict(str, Tensor), Dict(str, Tensor), Dict(str, Tensor), "
+       "Dict(str, Tensor), "
       "Dict(str, Tensor)?, Dict(str, int[]), Dict(str, int[]))"));
   m.def(TORCH_SELECTIVE_SCHEMA(
       "pyg::dist_neighbor_sample(Tensor rowptr, Tensor col, Tensor seed, int "
