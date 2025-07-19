@@ -9,6 +9,7 @@ import os.path as osp
 import re
 import subprocess
 import warnings
+import torch
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
@@ -58,16 +59,13 @@ class CMakeBuild(build_ext):
         cmake_args = [
             '-DBUILD_TEST=OFF',
             '-DBUILD_BENCHMARK=OFF',
-            '-DUSE_PYTHON=ON',
             f'-DWITH_CUDA={"ON" if WITH_CUDA else "OFF"}',
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}',
             f'-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={extdir}',
             f'-DCMAKE_BUILD_TYPE={self.build_type}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',
-            "-DPython3_ROOT_DIR=/egr/research-dselab/chenzh85/envs/pyg",
-            "-DPython3_EXECUTABLE=/egr/research-dselab/chenzh85/envs/pyg/bin/python",
-            "-DPython3_INCLUDE_DIR=/egr/research-dselab/chenzh85/envs/pyg/include/python3.12",
-            "-DPython3_LIBRARY=/egr/research-dselab/chenzh85/envs/pyg/lib/libpython3.12.so",
+            "-DPython3_ROOT_DIR=/home/ubuntu/AutoRDL/.venv",
+            "-DPython3_EXECUTABLE=/home/ubuntu/AutoRDL/.venv/bin/python",
         ]
 
         if CMakeBuild.check_env_flag('USE_MKL_BLAS'):
@@ -112,7 +110,7 @@ def mkl_dependencies():
     return dependencies
 
 
-install_requires = [] + mkl_dependencies()
+install_requires = ["torch==2.4.0"] + mkl_dependencies()
 
 triton_requires = [
     'triton',
